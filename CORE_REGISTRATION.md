@@ -14,7 +14,7 @@ Core 개발자는 계산과 아래 경로의 파일을 담당하고, 리드는 �
 | `include/<package>/policies/<name>.hpp` | 입력 보정 |
 | `include/<package>/parameters/<core 또는 bank>.hpp` | 파라미터 로더 |
 | `include/<package>/banks/<name>.hpp` | 같은 노드의 Core가 공유하는 계산 상태 |
-| `include/<package>/libraries/`, `src/libraries/` | 계산 라이브러리 |
+| `include/<package>/libraries/`, `src/libraries/` | 외부 라이브러리 복사본. 직접 작성한 계산은 Core 파일에 둔다. |
 | `package.xml` | 의존성, 외부 include root(`<export><node_pipeline include_roots="…"/></export>`) |
 | `CMakeLists.txt` | `find_package()`와 `np_add_nodes(INCLUDE_DIRS … LIBRARIES …)` |
 | `models/` | 파라미터 로더가 `asset()`으로 읽는 정적 자산 |
@@ -125,6 +125,7 @@ Core 생성자는 연결한 것만 파라미터 값, Bank 참조 순서로 받�
 - 다른 Core의 Core·등록·파라미터 파일.
 
 계약 검사를 우회하지 않는다. Core 알고리즘을 Validator·Policy·파라미터 로더·Bank·Selector로 옮겨 우회하지 않는다.
+직접 작성한 코드를 라이브러리로 옮겨 검사에서 제외하지 않는다. 여러 Core가 같은 코드를 쓰면 [코드 중복을 감수하고](README.md#라이브러리와-코드-중복) 각 Core 파일에 복사한다.
 
 **허용 범위 밖 변경이 필요하면 해당 변경을 중단하고 리드와 상의하며 반드시 명시적 허가를 요구한다.**
 입력 전달·타입·검사·선택·헤더·의존성·빌드 등 모든 범위 밖 변경에 같은 절차를 적용한다.

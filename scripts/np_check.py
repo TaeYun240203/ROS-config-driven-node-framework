@@ -412,7 +412,7 @@ def main():
     with open(args.include_dirs_file, encoding="utf-8") as stream:
         include_dirs = [line.strip() for line in stream if line.strip()]
     # 의존 헤더를 읽는 libclang AST 파싱은 빌드에서 실행하지 않는다.
-    errors = check(args.package_dir, args.package, args.src_dir, include_dirs, use_ast=False)
+    errors = check(args.package_dir, args.package, args.src_dir, include_dirs, use_ast=True)
     if errors:
         print(f"node_pipeline contract check failed for {args.package}:", file=sys.stderr)
         for error in errors:

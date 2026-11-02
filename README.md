@@ -1,8 +1,313 @@
 # node_pipeline
 
+## 소개
+
+ROS 1 노드를 YAML 설정과 계산 클래스(Core)만으로 만드는 config-driven 프레임워크다.
 모든 실행 노드가 공유하는 봉인된 공통 실행기다. 노드는 YAML로 구성하고, 기능은 공식 확장점 파일로만 확장한다.
 실행 흐름·입력 큐·조립·공통 검사·Core 선택·Core 호출·헤더 주입·발행은 이 패키지가 소유한다.
 실행 패키지는 이를 수정·대체하지 않으며 노드별 실행 코드를 작성하지 않는다.
+
+개발자가 작성하는 것은 다음이 전부다.
+
+| 작성 | 담는 내용 |
+| --- | --- |
+| `node.yaml` | 실행 방식, 구독 입력과 검사 한도, Stage 구성, 발행 토픽 |
+| Core | 메시지를 인자로 받아 계산 결과를 반환하는 `process()` 하나 |
+| 등록·선택 YAML | Core가 쓸 입력, 주행 구간(section)과 입력 상태에 따라 고를 Core |
+
+`main`, 콜백, 입력 시간 동기화, 입력 검사, fallback 선택, 헤더 주입, 발행은 작성하지 않는다.
+대상 환경은 ROS 1 Noetic, catkin, C++14다.
+
+## 개발 배경: Why config-driven development in the era of Vibe coding?
+
+코딩 에이전트는 코드를 빠르게 만들어 낸다. 주행해 보고, 실패를 확인하고, 고쳐서 다시 주행하는 시행착오 개발에는 더없이 잘 맞아 보인다.
+이 프레임워크는 그 속도를 자율주행 스택 개발에 그대로 쓰다가 겪은 문제에서 출발했다. 기능이 늘어나는 속도보다 코드베이스가 망가지는 속도가 더 빨랐다.
+
+### 미봉책의 누적: 스파게티화
+
+에이전트는 눈앞의 증상을 없애는 데 집중한다. 원인을 추적해 구조를 고치기보다 증상이 보이는 가장 가까운 곳에 분기와 fallback을 덧붙인다.
+각 수정은 당장의 테스트를 통과하므로 맞는 것처럼 보인다. 하지만 그 분기가 왜 생겼는지 모르는 다음 세션은 그 위에 또 다른 미봉책을 쌓는다.
+이것이 반복되면 계산·입력 검사·통신·상태 관리가 한 곳에 엉키고, 한 줄을 고칠 때 어디가 깨질지 아무도 예측하지 못하게 된다.
+
+### 오버엔지니어링: 통제되지 않는 사이드이펙트
+
+에이전트는 요청하지 않은 것까지 만든다. 한 번 쓰는 계산을 재사용 가능한 공통 라이브러리로 뽑고, 쓰이지 않을 옵션과 추상화를 더하고, 공유 헬퍼를 고쳐 쓴다.
+문제는 코드의 양만이 아니다. 공유 지점이 늘수록 한 실험의 변경이 의도하지 않은 곳의 동작을 바꾼다.
+튜닝 하나를 바꿨는데 다른 구간의 주행이 달라지면 무엇이 효과를 냈는지 알 수 없고, 시행착오에서 얻은 결과를 믿을 수 없게 된다. 빠른 반복의 전제 자체가 무너지는 것이다.
+
+### 가드레일로서의 config-driven 개발
+
+문서와 프롬프트에 적은 규칙은 권고에 그친다. 에이전트는 세션이 바뀌면 맥락을 잃고, 당장의 테스트 통과를 규칙보다 앞세운다.
+그래서 이 프레임워크는 에이전트의 판단을 믿는 대신 **에이전트가 손댈 수 있는 면적을 구조적으로 좁히고, 어기면 빌드가 실패하게 만든다.**
+
+| 에이전트의 성향 | 가드레일 |
+| --- | --- |
+| 입력 문제를 계산 코드의 분기로 때운다 | 실행 흐름과 입력 처리를 봉인했다. 입력 문제는 `node.yaml`의 한도, Validator, Policy로 드러나야 하고 Core는 입력 검사를 하지 않는다. |
+| 다른 모듈의 내부를 직접 건드린다 | Core끼리 include·참조할 수 없다. 공유 상태는 등록 YAML에 선언한 Bank로만 둔다. |
+| 통신·스레드·파일을 몰래 끌어들인다 | ROS 통신, 시각 조회, 스레드, 파일 입출력, 전역 가변 상태를 AST 검사로 거부한다. |
+| 변경 범위를 스스로 넓힌다 | 경로와 파일 이름이 정해져 있고 파일마다 담당자가 있다. 범위 밖 변경은 중단하고 [허가를 요청](CORE_REGISTRATION.md#허용-범위와-보고)한다. |
+| 실패한 실험의 흔적을 남긴다 | Core 교체는 `selection.yaml` 한 줄이고 해제는 등록 YAML 삭제다. 등록하지 않은 Core는 빌드하지 않으므로 실험이 다른 노드를 깨뜨리지 않는다. |
+
+이 구조에서 시행착오의 단위는 Core 파일 하나다. 실험이 실패하면 그 파일과 YAML 한 줄만 되돌리면 된다.
+입력을 추가하거나 Stage를 바꾸는 것처럼 경계를 건드리는 변경만 의도적으로 느리게 만들었다. 안쪽을 빠르게 고치기 위해 경계를 굳힌 것이다.
+
+### 중복을 감수한다
+
+이 프레임워크는 DRY보다 디커플링을 우선한다. 중복은 눈에 보이고 수정의 영향이 그 Core에 머물지만, 공유는 보이지 않는 결합을 만든다.
+같은 계산이 여러 Core에 필요해도 공통 코드로 뽑지 않고 각 Core 파일에 복사하는 것을 권장한다. 구체적인 규약은 [라이브러리와 코드 중복](#라이브러리와-코드-중복)을 따른다.
+
+실제로 `MORAI-Autonomous-Driving-System`의 `f902821`은 직접 작성한 경로 계획 라이브러리 5개(약 9,300줄)를 지우고 사용하는 Core 파일 안으로 옮겼다.
+여러 Core가 함께 쓰던 코드는 Core마다 복사했다. 동작을 바꾸지 않은 채 코드는 약 8,000줄 늘었지만, 각 Core가 자신의 알고리즘을 온전히 소유하게 되었고 그 코드 전체가 계약 검사 대상으로 돌아왔다.
+
+## How to use
+
+명령 속도를 상한으로 제한하는 노드를 예로 든다. 최종 트리는 [실행 패키지 구성](#실행-패키지-구성)을 따른다.
+
+### 1. 워크스페이스 준비
+
+프레임워크는 복사하지 않고 워크스페이스 저장소에 git 서브모듈로 연결한다. `interfaces`와 실행·서비스 패키지는 워크스페이스 저장소가 직접 소유한다.
+
+```text
+<workspace>/
+└── src/
+    ├── node_pipeline/     # 이 저장소 (git 서브모듈)
+    ├── interfaces/        # section 메시지를 담은 메시지 패키지
+    └── <실행 패키지·서비스 패키지>/
+```
+
+패키지를 이렇게 배치한 실제 워크스페이스 예시는 [MORAI-Autonomous-Driving-System](https://github.com/Team-Stier/MORAI-Autonomous-Driving-System)이다.
+
+ROS 1 Noetic에서 워크스페이스 저장소를 만들고 서브모듈을 추가한다.
+
+```bash
+mkdir -p ~/catkin_ws/src && cd ~/catkin_ws
+```
+
+```bash
+git init
+```
+
+```bash
+git submodule add https://github.com/TaeYun240203/ROS-config-driven-node-framework.git src/node_pipeline
+```
+
+이미 연결된 워크스페이스를 새로 받았다면 `git submodule update --init`으로 프레임워크를 받는다.
+서브모듈 안의 파일은 워크스페이스에서 고치지 않는다. 프레임워크 변경은 이 저장소에서 하고, 워크스페이스는 서브모듈 포인터만 갱신한다.
+
+프레임워크는 section 메시지를 담은 `interfaces` 패키지에 의존한다. 이 저장소에 포함되어 있지 않으므로 `src/interfaces`에 일반 패키지로 둔다.
+최소 구성은 `src/interfaces/msg/SectionAnnotation.msg` 하나를 빌드하는 메시지 패키지다.
+
+```text
+# src/interfaces/msg/SectionAnnotation.msg
+std_msgs/Header header
+uint8 UNKNOWN=0
+uint8 state
+```
+
+```cmake
+# src/interfaces/CMakeLists.txt
+cmake_minimum_required(VERSION 3.0.2)
+project(interfaces)
+find_package(catkin REQUIRED COMPONENTS message_generation std_msgs)
+add_message_files(FILES SectionAnnotation.msg)
+generate_messages(DEPENDENCIES std_msgs)
+catkin_package(CATKIN_DEPENDS message_runtime std_msgs)
+```
+
+```xml
+<!-- src/interfaces/package.xml -->
+<package format="2">
+  <name>interfaces</name>
+  <version>0.1.0</version>
+  <description>Workspace messages.</description>
+  <maintainer email="dev@example.com">dev</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>message_generation</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+  <depend>std_msgs</depend>
+</package>
+```
+
+### 2. 실행 패키지 만들기
+
+빌드 파일은 `find_package()`와 `np_add_nodes()`만 둔다.
+
+```cmake
+# src/demo_control/CMakeLists.txt
+cmake_minimum_required(VERSION 3.0.2)
+project(demo_control)
+find_package(catkin REQUIRED COMPONENTS node_pipeline geometry_msgs)
+np_add_nodes()
+```
+
+```xml
+<!-- src/demo_control/package.xml -->
+<package format="2">
+  <name>demo_control</name>
+  <version>0.1.0</version>
+  <description>Example node_pipeline package.</description>
+  <maintainer email="dev@example.com">dev</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>node_pipeline</depend>
+  <depend>geometry_msgs</depend>
+</package>
+```
+
+### 3. 노드 선언
+
+`config/` 아래 디렉터리 하나가 노드 하나다. 실행 파일 이름은 `speed_limiter_node`가 된다.
+
+```yaml
+# src/demo_control/config/speed_limiter/node.yaml
+execution: {mode: on_input, trigger_input: command, queue_capacity: 8}
+inputs:
+  command:
+    type: geometry_msgs/TwistStamped
+    topic: /command/raw
+    frame: base_link
+    numbers: [twist.linear.x]
+    stale_after_sec: 0.5
+    receive_timeout_sec: 0.5
+stages:
+  - name: limit
+    outputs:
+      - {name: limited, type: geometry_msgs/TwistStamped}
+output: {topic: /command/limited, frame_id: base_link}
+```
+
+### 4. Core와 파라미터 작성
+
+Core는 검사를 통과한 메시지를 받아 계산 결과만 반환한다. 입력 검사, 헤더 설정, 발행은 하지 않는다.
+파일 이름이 클래스 이름을 정한다(`clamp.hpp` → `Clamp`).
+
+```cpp
+// src/demo_control/include/demo_control/cores/clamp.hpp
+#pragma once
+#include <geometry_msgs/TwistStamped.h>
+#include <algorithm>
+namespace demo_control {
+struct ClampParameters {
+  double max_speed = 0.0;
+};
+class Clamp {
+ public:
+  explicit Clamp(ClampParameters parameters) : parameters_(parameters) {}
+  geometry_msgs::TwistStamped process(const geometry_msgs::TwistStamped& command) {
+    auto limited = command;
+    limited.twist.linear.x = std::min(command.twist.linear.x, parameters_.max_speed);
+    return limited;
+  }
+ private:
+  ClampParameters parameters_;
+};
+}  // namespace demo_control
+```
+
+```cpp
+// src/demo_control/include/demo_control/parameters/clamp.hpp
+#pragma once
+#include <demo_control/cores/clamp.hpp>
+#include <node_pipeline/extension.hpp>
+namespace demo_control {
+inline ClampParameters loadClampParameters(const node_pipeline::ParamReader& params) {
+  ClampParameters parameters;
+  parameters.max_speed = params.number("max_speed");
+  return parameters;
+}
+}  // namespace demo_control
+```
+
+```yaml
+# src/demo_control/config/speed_limiter/parameters/clamp.yaml
+max_speed: 5.0
+```
+
+### 5. Core 등록과 선택
+
+등록 YAML은 Core를 Stage에 연결하고, `selection.yaml`은 section별로 실행할 Core를 고른다. `section_topic`을 생략하면 section은 항상 UNKNOWN(0)이다.
+
+```yaml
+# src/demo_control/config/speed_limiter/registrations/clamp.yaml
+stage: limit
+inputs: [command]
+```
+
+```yaml
+# src/demo_control/config/speed_limiter/selection.yaml
+limit:
+  section_core_map:
+    "0": clamp.hpp
+  health_core_map: []
+```
+
+### 6. 빌드와 실행
+
+계약 검사에는 libclang이 필요하므로 의존성을 먼저 설치한다. 위반이 하나라도 있으면 컴파일 전에 빌드가 중단된다.
+
+```bash
+cd ~/catkin_ws && source /opt/ros/noetic/setup.bash
+```
+
+```bash
+rosdep install --from-paths src --ignore-src --rosdistro noetic -y
+```
+
+```bash
+catkin_make && source devel/setup.bash
+```
+
+`roscore`를 띄운 뒤 터미널을 나누어 실행한다. 입력 8.0이 상한 5.0으로 제한되어 발행된다.
+
+```bash
+rosrun demo_control speed_limiter_node
+```
+
+```bash
+rostopic pub -s -r 10 /command/raw geometry_msgs/TwistStamped '{header: {stamp: now, frame_id: base_link}, twist: {linear: {x: 8.0}}}'
+```
+
+```bash
+rostopic echo /command/limited/twist/linear/x
+```
+
+### 7. 실험하고 되돌리기
+
+새 알고리즘은 기존 Core를 고치지 않고 새 Core로 추가한다.
+
+```cpp
+// src/demo_control/include/demo_control/cores/bypass.hpp
+#pragma once
+#include <geometry_msgs/TwistStamped.h>
+namespace demo_control {
+class Bypass {
+ public:
+  geometry_msgs::TwistStamped process(const geometry_msgs::TwistStamped& command) { return command; }
+};
+}  // namespace demo_control
+```
+
+```yaml
+# src/demo_control/config/speed_limiter/registrations/bypass.yaml
+stage: limit
+inputs: [command]
+```
+
+새 Core를 등록하면 재빌드한다. 이후 어떤 Core를 쓸지는 `selection.yaml`의 `"0": bypass.hpp` 한 줄로 바꾸며, 이 변경과 파라미터 값 변경은 노드 재시작만으로 반영된다.
+실험이 실패하면 그 줄을 되돌리고, Core를 버리려면 [해제 절차](CORE_REGISTRATION.md#해제)를 따른다.
+
+### 8. 계약 위반
+
+규칙을 어기면 다음처럼 파일과 줄을 짚어 빌드가 중단된다. 예를 들어 Core에 전역 변수를 두면 다음과 같다.
+
+```text
+node_pipeline contract check failed for demo_control:
+  .../include/demo_control/cores/clamp.hpp:6: global mutable state 'call_count' is not allowed
+```
+
+검사를 우회하지 말고 Core 안의 멤버로 옮기거나, Core 간 공유가 정말 필요하면 Bank로 선언한다.
+Core 작성·등록의 상세 절차와 범위 밖 변경의 보고 방법은 [Core 등록 가이드](CORE_REGISTRATION.md)를 따른다.
 
 ## 구성
 
@@ -36,8 +341,8 @@ src/<package>/
 │   ├── policies/<name>.hpp
 │   ├── parameters/<core 또는 bank>.hpp
 │   ├── banks/<name>.hpp
-│   └── libraries/                  # 계산 라이브러리 헤더
-├── src/libraries/                  # 계산 라이브러리 소스
+│   └── libraries/                  # 외부 라이브러리 복사본 헤더
+├── src/libraries/                  # 외부 라이브러리 복사본 소스
 └── test/unit/test_*.cpp
 ```
 
@@ -104,6 +409,17 @@ Pipeline은 선택된 Core의 선언 입력 issue 중 0 이상인 Policy priorit
 동률은 input·issue 순회 순서이며 Missing도 Policy 대상이다. `EditableInput`은 해당 입력의 `remove()`, 같은 타입 복사본의 `modify<T>(fn)`, Missing 슬롯을 채우는 `bool fill<T>(T value)`를 제공한다.
 `fill()`은 슬롯이 Missing이고 기대 타입과 `T`가 같을 때만 값을 채워 true를 반환한다. 이미 payload가 있거나 타입이 다르면 변경 없이 false를 반환한다. 대체값도 다음 health 재검사를 통과해야 Core를 호출한다.
 `ParamReader`는 해당 Core 파라미터의 `has(key)`·`number(key)`·`integer(key)`·`text(key)`·`flag(key)`·`numbers(key)`·`keys(key)`와, 파라미터로 지정한 정적 자산 파일의 내용을 읽는 `asset(key)`만 제공한다. 키 경로는 `a/b`로 쓰고, 자산의 상대 경로는 패키지 디렉터리 기준이다. 키가 없거나 타입이 다르면 예외를 던지며, 시작 단계 실패로 보고된다.
+
+## 라이브러리와 코드 중복
+
+`include/<package>/libraries/`와 `src/libraries/`는 외부 오픈소스를 편하게 이식해 쓰도록 열어 둔 경로다. 그래서 이 경로의 내부 구현은 계약 검사 대상이 아니다.
+
+- 직접 작성한 코드를 라이브러리로 옮겨 검사를 우회하지 않는다. 자체 계산 함수와 상태는 Core 파일 안에 둔다.
+- 여러 Core가 같은 코드를 쓰면 공통 코드로 뽑지 않고 각 Core 파일에 복사한다. 코드 중복을 감수하는 것을 권장한다.
+- 노드의 모든 Core 헤더는 한 번역 단위에 포함되므로, 복사한 코드는 이름이 겹치지 않도록 Core 고유 이름공간에 둔다.
+- Stage 출력의 C++ 타입은 `node.yaml`의 `header:`가 `libraries/`를 가리켜야 하므로 예외다. 이 헤더에는 타입 정의만 둔다.
+
+직접 작성한 코드인지는 검사기가 구분할 수 없다. 이 규약은 빌드가 아니라 개발자와 리뷰가 지킨다.
 
 ## YAML
 
@@ -209,11 +525,11 @@ issue 이름은 `Missing`·`InvalidStamp`·`FutureStamp`·`FrameMismatch`·`NaN`
 1. 경로 검사: C++ 소스와 설정 파일은 위 구성의 경로에만 둔다. 노드마다 `node.yaml`·`selection.yaml`이 필요하다.
 2. YAML 검사: 스키마·이름·Stage 입출력 대응·확장점 파일 존재를 검사한다. YAML은 C++ 표현식·함수 본문을 받지 않으며, 필드 경로는 식별자와 `.`만 허용한다.
 3. 생성·컴파일 검사: `process()`는 선언 입력 타입의 `const&`를 순서대로 받고 예약 입력 `stamp`의 타입은 `const ros::Time&`다. Stage `outputs`의 개수·타입·순서대로 반환한다. 같은 Stage의 후보 Core는 같은 출력 계약을 갖는다. Validator·Policy는 상태 없는 타입이다.
-4. include 검사: 확장점·라이브러리 파일은 표준 라이브러리, `package.xml`에 선언한 의존성의 헤더, `package.xml`의 `<export><node_pipeline include_roots="…"/></export>`에 선언한 외부 include root, 로그용 `<ros/console.h>`, `node_pipeline/extension.hpp`, 같은 패키지의 `libraries/` 헤더만 include한다. Core는 연결한 Bank 헤더를, 파라미터 로더는 자기 Core 또는 Bank 헤더를 추가로 include할 수 있다. ROS 통신 헤더, `<fstream>`·`<thread>`·`<future>`·`<mutex>`, 다른 실행 패키지의 헤더는 거부한다.
+4. include 검사: 확장점 파일은 표준 라이브러리, `package.xml`에 선언한 의존성의 헤더, `package.xml`의 `<export><node_pipeline include_roots="…"/></export>`에 선언한 외부 include root, 로그용 `<ros/console.h>`, `node_pipeline/extension.hpp`, 같은 패키지의 `libraries/` 헤더만 include한다. Core는 연결한 Bank 헤더를, 파라미터 로더는 자기 Core 또는 Bank 헤더를 추가로 include할 수 있다. ROS 통신 헤더, `<fstream>`·`<thread>`·`<future>`·`<mutex>`, 다른 실행 패키지의 헤더는 거부한다.
 5. AST 검사: 전역·정적 가변 상태, ROS 통신·시각 조회 API(`ros::NodeHandle`·`ros::Publisher`·`ros::Time::now` 등), 스레드·프로세스·네트워크, 파일 입출력, 다른 Core 타입의 소유·참조·호출, `main` 정의, Pipeline 내부 이름공간 참조를 거부한다. `ROS_*` 로그 매크로가 펼친 위치 캐시 static 변수와 `ros::console`·throttle 시각 조회는 허용한다. AST는 `libclang-dev`의 libclang으로 해석한다.
 6. 테스트 등록: `test/unit/test_*.cpp`를 gtest로, `test/unit/test_*.py`를 nosetests로 등록한다. 테스트에는 `NP_PACKAGE_DIR`이 정의된다.
 
-검사 대상은 `libraries/` 전체와, 등록 YAML이 연결한 Core·Validator·Policy·Bank와 그 파라미터 로더다. 등록하지 않은 Core 파일은 빌드하거나 검사하지 않는다.
+검사 대상은 등록 YAML이 연결한 Core·Validator·Policy·Bank와 그 파라미터 로더다. `libraries/`는 [검사하지 않는다](#라이브러리와-코드-중복). 등록하지 않은 Core 파일은 빌드하거나 검사하지 않는다.
 
 ## 실행 시퀀스
 
