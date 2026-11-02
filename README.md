@@ -1,4 +1,4 @@
-# node_pipeline
+# ROS-config-driven-node-framework
 
 ## 소개
 
